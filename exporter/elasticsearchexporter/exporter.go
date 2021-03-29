@@ -46,6 +46,7 @@ type elasticsearchExporter struct {
 
 	client      *esClientCurrent
 	bulkIndexer esBulkIndexerCurrent
+	model       mappingModel
 }
 
 var retryOnStatus = []int{500, 502, 503, 504, 429}
@@ -72,6 +73,9 @@ func newExporter(logger *zap.Logger, cfg *Config) (*elasticsearchExporter, error
 		maxAttempts = cfg.Retry.MaxRequests
 	}
 
+	// TODO: configure the model
+	model := &encodeModel{dedup: true, dedot: false}
+
 	return &elasticsearchExporter{
 		logger:      logger,
 		client:      client,
@@ -79,6 +83,7 @@ func newExporter(logger *zap.Logger, cfg *Config) (*elasticsearchExporter, error
 
 		index:       cfg.Index,
 		maxAttempts: maxAttempts,
+		model:       model,
 	}, nil
 }
 
@@ -87,7 +92,27 @@ func (e *elasticsearchExporter) Shutdown(ctx context.Context) error {
 }
 
 func (e *elasticsearchExporter) pushLogsData(ctx context.Context, ld pdata.Logs) (dropped int, err error) {
-	panic("TODO")
+	rls := ld.ResourceLogs()
+	for i := 0; i < rls.Len(); i++ {
+		ills := rls.At(i).InstrumentationLibraryLogs()
+		for j := 0; j < ills.Len(); j++ {
+			logs := ills.At(i).Logs()
+			for k := 0; k < logs.Len(); k++ {
+				record := logs.At(k)
+				document, err := e.model.encodeLog(record)
+				if err != nil {
+					e.logger.Error("Failed to encode event", zap.NamedError("reason", err))
+					dropped++
+					continue
+				}
+
+				if err := e.pushEvent(ctx, document); err != nil {
+					return dropped, err
+				}
+			}
+		}
+	}
+	return dropped, nil
 }
 
 func (e *elasticsearchExporter) pushEvent(ctx context.Context, document []byte) error {
